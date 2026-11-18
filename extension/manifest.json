@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "OJ-QWEN",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "description": "Полноценный вайбкод-клиент поверх chat.qwen.ai с локальными файлами, планированием, памятью, diff и откатом изменений.",
   "permissions": [
     "storage",
@@ -10,7 +10,8 @@
   ],
   "host_permissions": [
     "https://api.github.com/repos/offlinejust/OJ-QWEN/*",
-    "https://github.com/offlinejust/OJ-QWEN/*"
+    "https://github.com/offlinejust/OJ-QWEN/*",
+    "https://docs.google.com/forms/d/e/1FAIpQLScl6vuzKwRWSqxB7Rm7KO9PMl488NVMfR_HJ9sp9FaGFDnxeA/*"
   ],
   "background": {
     "service_worker": "background.js"

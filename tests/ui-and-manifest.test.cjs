@@ -162,6 +162,7 @@ test('background.js handles oj:check-update (caching, force, newer, same, 404, 4
     setTimeout,
     clearTimeout,
     AbortController,
+    URLSearchParams,
     fetch: async (...args) => { fetchCount++; return mockFetchResponse; },
     chrome: {
       runtime: {
@@ -235,4 +236,33 @@ test('background.js handles oj:check-update (caching, force, newer, same, 404, 4
   assert.equal(sessionStore.get('overlayOpen:42'), true);
   tabRemovedHandler(42);
   assert.equal(sessionStore.has('overlayOpen:42'), false);
+
+  // 6. Bug report submission to Google Forms (validation, POST fields, rate limit)
+  const rEmpty = await callMsg({ type: 'oj:submit-bug-report', payload: { title: '', description: '' } });
+  assert.ok(rEmpty.error && rEmpty.error.includes('Заполните описание'));
+
+  let postedUrl = '';
+  let postedBody = '';
+  sandbox.fetch = async (url, opts) => {
+    postedUrl = url;
+    postedBody = opts.body;
+    return { ok: true, status: 200, url };
+  };
+  const rBug = await callMsg({
+    type: 'oj:submit-bug-report',
+    payload: { title: 'Test bug', description: 'Details here', diagnostics: '{"ok":true}' },
+  });
+  assert.equal(rBug.data.submitted, true);
+  assert.ok(postedUrl.includes('/formResponse'));
+  const params = new URLSearchParams(postedBody);
+  assert.equal(params.get('entry.372530561'), 'Test bug');
+  assert.equal(params.get('entry.217317406'), 'Details here');
+  assert.equal(params.get('entry.981817312'), '{"ok":true}');
+
+  // Immediate repeat must be rate-limited
+  const rLimit = await callMsg({
+    type: 'oj:submit-bug-report',
+    payload: { title: 'Spam', description: 'Spam' },
+  });
+  assert.ok(rLimit.error && rLimit.error.includes('15 секунд'));
 });

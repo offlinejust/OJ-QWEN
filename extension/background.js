@@ -5,6 +5,14 @@ const RELEASES_API_URL = `https://api.github.com/repos/${REPO_SLUG}/releases/lat
 const UPDATE_CACHE_KEY = 'ojQwenUpdateCache:v1';
 const UPDATE_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
 
+const BUG_FORM_URL = 'https://docs.google.com/forms/d/e/1FAIpQLScl6vuzKwRWSqxB7Rm7KO9PMl488NVMfR_HJ9sp9FaGFDnxeA/formResponse';
+const BUG_FORM_FIELDS = {
+  title: 'entry.372530561',
+  description: 'entry.217317406',
+  diagnostics: 'entry.981817312',
+};
+let lastBugSubmitAt = 0;
+
 function compareVersions(a, b) {
   const pa = String(a || '').replace(/^v/i, '').split('.').map(n => parseInt(n, 10) || 0);
   const pb = String(b || '').replace(/^v/i, '').split('.').map(n => parseInt(n, 10) || 0);
@@ -25,7 +33,7 @@ async function fetchWithTimeout(url, opts = {}, timeoutMs = 10_000) {
     return await fetch(url, { ...opts, signal: controller ? controller.signal : undefined });
   } catch (err) {
     if (err?.name === 'AbortError') {
-      throw new Error('Таймаут подключения к GitHub (10 с).');
+      throw new Error('Превышено время ожидания ответа сервера.');
     }
     throw err;
   } finally {
@@ -134,6 +142,46 @@ async function checkLatestRelease({ force = false } = {}) {
   return result;
 }
 
+async function submitBugReport({ title, description, diagnostics }) {
+  const now = Date.now();
+  if (now - lastBugSubmitAt < 15_000) {
+    throw new Error('Подождите 15 секунд перед повторной отправкой отчёта.');
+  }
+  const cleanTitle = String(title || '').trim().slice(0, 160);
+  const cleanDesc = String(description || '').trim().slice(0, 8000);
+  const cleanDiag = String(diagnostics || '').trim().slice(0, 16000);
+  if (!cleanTitle || !cleanDesc) {
+    throw new Error('Заполните описание ошибки перед отправкой.');
+  }
+
+  const params = new URLSearchParams();
+  params.append(BUG_FORM_FIELDS.title, cleanTitle);
+  params.append(BUG_FORM_FIELDS.description, cleanDesc);
+  params.append(BUG_FORM_FIELDS.diagnostics, cleanDiag);
+
+  const res = await fetchWithTimeout(
+    BUG_FORM_URL,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+      body: params.toString(),
+      redirect: 'follow',
+    },
+    15_000
+  );
+
+  if (!res.ok) {
+    throw new Error(`Сервер формы ответил HTTP ${res.status}.`);
+  }
+  // If Google redirected to accounts.google.com, the form requires sign-in
+  if (typeof res.url === 'string' && res.url.includes('accounts.google.com')) {
+    throw new Error('Форма требует авторизации Google. Попробуйте скопировать отчёт вручную.');
+  }
+
+  lastBugSubmitAt = Date.now();
+  return { submitted: true };
+}
+
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (!message || sender.id !== chrome.runtime.id) return false;
   if (sender.origin !== QWEN_ORIGIN || sender.frameId !== 0) return false;
@@ -154,6 +202,14 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
 
   if (message.type === 'oj:check-update') {
     checkLatestRelease({ force: Boolean(message.force) }).then(
+      data => respond({ data }),
+      error => respond({ error: error.message })
+    );
+    return true;
+  }
+
+  if (message.type === 'oj:submit-bug-report') {
+    submitBugReport(message.payload || {}).then(
       data => respond({ data }),
       error => respond({ error: error.message })
     );

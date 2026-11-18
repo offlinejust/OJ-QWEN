@@ -272,6 +272,38 @@ var OjAgentEngine = (() => {
     };
 
     let activeRun = null;
+    const debugLog = [];
+    const MAX_DEBUG_LOG = 30;
+
+    function pushLog(kind, detail = '') {
+      const now = new Date();
+      const ts = now.toTimeString().slice(0, 8);
+      debugLog.push({
+        t: ts,
+        k: String(kind || 'info'),
+        d: String(detail || '').slice(0, 220),
+      });
+      if (debugLog.length > MAX_DEBUG_LOG) {
+        debugLog.splice(0, debugLog.length - MAX_DEBUG_LOG);
+      }
+    }
+
+    if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+      window.addEventListener('error', ev => {
+        const src = String(ev?.filename || '');
+        if (src.startsWith('chrome-extension://') || src.includes('/lib/')) {
+          const base = src.split('/').pop() || 'ext';
+          pushLog('js-error', `${base}:${ev.lineno || 0} ${ev.message || ''}`);
+        }
+      });
+      window.addEventListener('unhandledrejection', ev => {
+        const reason = ev?.reason;
+        const stack = String(reason?.stack || '');
+        if (stack.includes('chrome-extension://') || stack.includes('OjAgentEngine') || stack.includes('OjOverlayUI')) {
+          pushLog('rejection', String(reason?.message || reason || '').slice(0, 200));
+        }
+      });
+    }
 
     function emit(event = 'state') {
       for (const fn of listeners) {
@@ -587,6 +619,7 @@ var OjAgentEngine = (() => {
       state.connectionError = '';
       state.error = '';
       state.connectionText = 'Загружаю проекты Qwen…';
+      pushLog('connect', 'start');
       emit('connect');
       // Quietly check GitHub releases in background (6h cache in background.js)
       void checkUpdates(false);
@@ -659,8 +692,10 @@ var OjAgentEngine = (() => {
       } catch (err) {
         state.connectionError = err.message;
         state.connectionText = err.message;
+        pushLog('connect-err', err.message);
       } finally {
         state.connecting = false;
+        pushLog('connect', state.projectReady ? `ready (chats=${state.catalog.length})` : 'not-ready');
         emit('connect');
       }
     }
@@ -810,7 +845,10 @@ var OjAgentEngine = (() => {
         }
         await refreshWorkspaceInfo();
       } catch (err) {
-        if (mySeq === chatOpSeq) state.error = err.message;
+        if (mySeq === chatOpSeq) {
+          state.error = err.message;
+          pushLog('selectChat-err', err.message);
+        }
       } finally {
         if (mySeq === chatOpSeq) {
           state.loadingChat = false;
@@ -837,6 +875,7 @@ var OjAgentEngine = (() => {
 
     function setError(message) {
       state.error = message || '';
+      if (state.error) pushLog('error', state.error);
       emit('error');
     }
 
@@ -1599,6 +1638,7 @@ var OjAgentEngine = (() => {
         stepRecords[i].diff = sum.diff || null;
         stepRecords[i].backupId = sum.backupId || null;
         results.push(r);
+        if (!sum.ok) pushLog('op-err', `${op.op}: ${r?.error || sum.text}`);
         if (sum.backupId) {
           state.backups = await fsStore.listBackups(state.activeChatKey);
         }
@@ -1805,6 +1845,9 @@ var OjAgentEngine = (() => {
       } catch (err) {
         if (!run.stopped) {
           state.error = err.message;
+          pushLog('sendTask-err', err.message);
+        } else {
+          pushLog('sendTask', 'stopped-by-user');
         }
       } finally {
         // Keep state.running = true while finalizing chat binding & transcript sync so user clicks can't race!
@@ -1896,6 +1939,57 @@ var OjAgentEngine = (() => {
       }
     }
 
+    async function collectBugDiagnostics() {
+      const domDiag = await OjQwenAdapter.collectDomDiagnostics().catch(err => ({ error: err.message }));
+      const apiStatus = {};
+      if (domDiag?.apiProbe && typeof domDiag.apiProbe === 'object') {
+        for (const [k, v] of Object.entries(domDiag.apiProbe)) {
+          if (v?.error) apiStatus[k] = 'ERR: ' + v.error;
+          else if (v?.status) {
+            const count = v.count !== undefined ? v.count : v.messageCount;
+            apiStatus[k] = count !== undefined ? `${v.status} (${count})` : String(v.status);
+          }
+        }
+      }
+      return {
+        engine: {
+          projectReady: state.projectReady,
+          connecting: state.connecting,
+          loadingChat: state.loadingChat,
+          running: state.running,
+          stopped: state.stopped,
+          isDraft: state.isDraft,
+          hasWorkspace: Boolean(state.workspace),
+          workspaceGranted: Boolean(state.workspace?.granted),
+          catalogCount: state.catalog.length,
+          transcriptCount: state.transcript.length,
+          protocolMsgCount: state.protocolMsgCount,
+          contextPercent: Number((state.contextWindow?.percent || 0).toFixed(1)),
+          activePlanStatus: state.activePlan?.status || 'none',
+          plansCount: state.plans.length,
+          backupsCount: state.backups.length,
+          pendingConfirmationOp: state.pendingConfirmation?.op || null,
+          hasPendingQuestion: Boolean(state.pendingQuestion),
+          lastError: state.error || '',
+          connectionError: state.connectionError || '',
+        },
+        page: {
+          url: domDiag?.url || '',
+          viewport: typeof window !== 'undefined' ? `${window.innerWidth}x${window.innerHeight}` : '',
+          composerFound: Boolean(domDiag?.composerFound),
+          answerCount: domDiag?.answerCount ?? 0,
+          apiStatus,
+        },
+        recentEvents: [...debugLog],
+      };
+    }
+
+    async function submitBugReport(payload) {
+      const reply = await chrome.runtime.sendMessage({ type: 'oj:submit-bug-report', payload });
+      if (reply?.error) throw new Error(reply.error);
+      return reply?.data || { submitted: true };
+    }
+
     function getStepsForTurn(turn) {
       return (turn && stepHistory[turn]?.steps) || null;
     }
@@ -1925,6 +2019,8 @@ var OjAgentEngine = (() => {
       resolveQuestion,
       stop,
       checkUpdates,
+      collectBugDiagnostics,
+      submitBugReport,
       getStepsForTurn,
       refreshWorkspaceInfo,
       collectDomDiagnostics: () => OjQwenAdapter.collectDomDiagnostics(),

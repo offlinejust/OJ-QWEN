@@ -1074,7 +1074,7 @@ var OjOverlayUI = (() => {
         const hint = document.createElement('div');
         hint.style.fontSize = '12.5px';
         hint.style.color = '#98a395';
-        hint.textContent = 'Опишите проблему в пару строк. Можно открыть предзаполненный GitHub Issue или скопировать готовый отчёт для отправки в чат.';
+        hint.textContent = 'Опишите проблему — отчёт отправится разработчику напрямую без регистрации (переписка и файлы не прикладываются).';
 
         const fDesc = document.createElement('div');
         fDesc.className = 'field';
@@ -1082,7 +1082,7 @@ var OjOverlayUI = (() => {
         descLabel.textContent = 'Что произошло?';
         const descInput = document.createElement('textarea');
         descInput.className = 'bug-textarea';
-        descInput.placeholder = 'Например: при открытии проекта список чатов не загрузился…';
+        descInput.placeholder = 'Например: при открытии проекта список чатов не загрузился, или кнопка не сработала…';
         fDesc.append(descLabel, descInput);
 
         const fDiag = document.createElement('label');
@@ -1090,66 +1090,93 @@ var OjOverlayUI = (() => {
         const diagCb = document.createElement('input');
         diagCb.type = 'checkbox';
         diagCb.checked = true;
-        fDiag.append(diagCb, document.createTextNode('Приложить техданные (версия, браузер, последняя ошибка — без переписки и файлов)'));
+        fDiag.append(diagCb, document.createTextNode('Приложить техданные (версия, браузер, состояние движка и лог последних ошибок — без переписки и файлов)'));
 
         const statusDiv = document.createElement('div');
         statusDiv.style.fontSize = '12px';
         statusDiv.style.color = '#8de09b';
         statusDiv.hidden = true;
 
-        async function buildReportMarkdown() {
-          const userDesc = descInput.value.trim() || '(опишите, что произошло и какие шаги к этому привели)';
-          const lines = [
+        function detectBrowserShort(ua) {
+          const s = String(ua || '');
+          const ya = /YaBrowser\/([\d.]+)/.exec(s);
+          if (ya) return `Яндекс Браузер ${ya[1]}`;
+          const edg = /Edg\/([\d.]+)/.exec(s);
+          if (edg) return `Edge ${edg[1]}`;
+          const opr = /OPR\/([\d.]+)/.exec(s);
+          if (opr) return `Opera ${opr[1]}`;
+          const chr = /Chrome\/([\d.]+)/.exec(s);
+          if (chr) return `Chrome ${chr[1]}`;
+          return s.slice(0, 80);
+        }
+
+        async function buildReportParts() {
+          const userDesc = descInput.value.trim();
+          const titleLine = userDesc.split('\n')[0].trim().slice(0, 90) || `Ошибка в OJ-QWEN ${appVersion}`;
+          const envLines = [
             '### Описание проблемы',
-            userDesc,
+            userDesc || '(без описания)',
             '',
             '### Среда',
             `- **Версия OJ-QWEN:** ${appVersion}`,
-            `- **Браузер:** ${navigator.userAgent}`,
+            `- **Браузер:** ${detectBrowserShort(navigator.userAgent)}`,
+            `- **Окно:** ${window.innerWidth}×${window.innerHeight}`,
             `- **Режим безопасности:** ${engine.getSettings().safetyMode || 'ask_all'}`,
-            `- **Рабочая папка подключена:** ${st.workspace?.granted ? 'да' : 'нет'}`,
+            `- **Рабочая папка:** ${st.workspace?.granted ? 'подключена' : st.workspace ? 'ждёт подтверждения' : 'не выбрана'}`,
           ];
           const lastErr = st.error || st.connectionError;
-          if (lastErr) {
-            lines.push(`- **Последняя ошибка:** ${lastErr}`);
-          }
+          if (lastErr) envLines.push(`- **Последняя ошибка:** ${lastErr}`);
+
+          let diagJson = '';
           if (diagCb.checked) {
             try {
-              const diag = await engine.collectDomDiagnostics();
-              const safeDiag = {
-                url: diag.url,
-                composerFound: diag.composerFound,
-                answerCount: diag.answerCount,
-                apiProbe: diag.apiProbe,
-              };
-              lines.push('', '### Техническая диагностика (без переписки)', '```json', JSON.stringify(safeDiag, null, 2), '```');
+              const diag = await engine.collectBugDiagnostics();
+              diagJson = JSON.stringify(diag, null, 2);
             } catch {}
           }
-          return lines.join('\n');
+          const description = envLines.join('\n');
+          const fullMarkdown = diagJson
+            ? `${description}\n\n### Техническая диагностика (без переписки)\n\`\`\`json\n${diagJson}\n\`\`\``
+            : description;
+          return { title: titleLine, description, diagnostics: diagJson, fullMarkdown };
         }
 
-        const actions = document.createElement('div');
-        actions.className = 'modal-actions';
-
-        const ghBtn = document.createElement('button');
-        ghBtn.type = 'button';
-        ghBtn.className = 'primary';
-        ghBtn.textContent = 'Открыть GitHub Issue ↗';
-        ghBtn.onclick = async () => {
-          ghBtn.disabled = true;
+        const sendBtn = document.createElement('button');
+        sendBtn.type = 'button';
+        sendBtn.className = 'primary';
+        sendBtn.textContent = 'Отправить отчёт';
+        sendBtn.onclick = async () => {
+          if (!descInput.value.trim()) {
+            statusDiv.hidden = false;
+            statusDiv.style.color = '#f0c975';
+            statusDiv.textContent = 'Напишите хотя бы пару слов о том, что пошло не так.';
+            descInput.focus();
+            return;
+          }
+          sendBtn.disabled = true;
+          sendBtn.textContent = 'Отправляю…';
           try {
-            const report = await buildReportMarkdown();
-            const shortTitle = descInput.value.trim().split('\n')[0].slice(0, 72) || `Ошибка в OJ-QWEN ${appVersion}`;
-            const trimmedBody = report.length > 3500 ? report.slice(0, 3480) + '\n…' : report;
-            const url = `https://github.com/offlinejust/OJ-QWEN/issues/new?labels=bug&title=${encodeURIComponent(shortTitle)}&body=${encodeURIComponent(trimmedBody)}`;
-            window.open(url, '_blank', 'noopener,noreferrer');
+            const parts = await buildReportParts();
+            await engine.submitBugReport({
+              title: parts.title,
+              description: parts.description,
+              diagnostics: parts.diagnostics,
+            });
             statusDiv.hidden = false;
             statusDiv.style.color = '#8de09b';
-            statusDiv.textContent = 'Открыта страница нового Issue на GitHub.';
-          } finally {
-            ghBtn.disabled = false;
+            statusDiv.textContent = 'Спасибо! Отчёт успешно отправлен разработчику.';
+            sendBtn.textContent = 'Отправлено ✓';
+          } catch (err) {
+            statusDiv.hidden = false;
+            statusDiv.style.color = '#f58b80';
+            statusDiv.textContent = 'Не удалось отправить напрямую: ' + err.message + ' Можно скопировать отчёт или открыть GitHub Issue ниже.';
+            sendBtn.disabled = false;
+            sendBtn.textContent = 'Отправить отчёт';
           }
         };
+
+        const altRow = document.createElement('div');
+        altRow.className = 'modal-actions';
 
         const copyBtn = document.createElement('button');
         copyBtn.type = 'button';
@@ -1157,11 +1184,11 @@ var OjOverlayUI = (() => {
         copyBtn.onclick = async () => {
           copyBtn.disabled = true;
           try {
-            const report = await buildReportMarkdown();
-            await navigator.clipboard.writeText(report);
+            const parts = await buildReportParts();
+            await navigator.clipboard.writeText(parts.fullMarkdown);
             statusDiv.hidden = false;
             statusDiv.style.color = '#8de09b';
-            statusDiv.textContent = 'Отчёт скопирован в буфер — можно вставить в любой чат.';
+            statusDiv.textContent = 'Отчёт скопирован в буфер обмена.';
           } catch {
             statusDiv.hidden = false;
             statusDiv.style.color = '#f58b80';
@@ -1171,8 +1198,23 @@ var OjOverlayUI = (() => {
           }
         };
 
-        actions.append(ghBtn, copyBtn);
-        body.append(hint, fDesc, fDiag, actions, statusDiv);
+        const ghBtn = document.createElement('button');
+        ghBtn.type = 'button';
+        ghBtn.textContent = 'Открыть GitHub Issue ↗';
+        ghBtn.onclick = async () => {
+          ghBtn.disabled = true;
+          try {
+            const parts = await buildReportParts();
+            const trimmedBody = parts.fullMarkdown.length > 3500 ? parts.fullMarkdown.slice(0, 3480) + '\n…' : parts.fullMarkdown;
+            const url = `https://github.com/offlinejust/OJ-QWEN/issues/new?labels=bug&title=${encodeURIComponent(parts.title)}&body=${encodeURIComponent(trimmedBody)}`;
+            window.open(url, '_blank', 'noopener,noreferrer');
+          } finally {
+            ghBtn.disabled = false;
+          }
+        };
+
+        altRow.append(copyBtn, ghBtn);
+        body.append(hint, fDesc, fDiag, sendBtn, altRow, statusDiv);
         descInput.focus();
       });
     }
