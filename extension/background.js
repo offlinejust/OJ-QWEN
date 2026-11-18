@@ -2,6 +2,8 @@ const QWEN_ORIGIN = 'https://chat.qwen.ai';
 const REPO_SLUG = 'offlinejust/OJ-QWEN';
 const RELEASES_PAGE_URL = `https://github.com/${REPO_SLUG}/releases/latest`;
 const RELEASES_API_URL = `https://api.github.com/repos/${REPO_SLUG}/releases/latest`;
+const UPDATE_CACHE_KEY = 'ojQwenUpdateCache:v1';
+const UPDATE_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
 
 function compareVersions(a, b) {
   const pa = String(a || '').replace(/^v/i, '').split('.').map(n => parseInt(n, 10) || 0);
@@ -56,39 +58,80 @@ async function checkViaRedirect(currentVersion) {
   };
 }
 
-async function checkLatestRelease() {
+async function readUpdateCache() {
+  try {
+    const res = await chrome.storage.local?.get(UPDATE_CACHE_KEY);
+    return res?.[UPDATE_CACHE_KEY] || null;
+  } catch {
+    return null;
+  }
+}
+
+async function writeUpdateCache(result) {
+  try {
+    await chrome.storage.local?.set({
+      [UPDATE_CACHE_KEY]: {
+        checkedAt: Date.now(),
+        latestVersion: result.latestVersion,
+        noReleases: Boolean(result.noReleases),
+        releaseUrl: result.releaseUrl || RELEASES_PAGE_URL,
+      },
+    });
+  } catch {}
+}
+
+async function checkLatestRelease({ force = false } = {}) {
   const currentVersion = chrome.runtime.getManifest().version;
+
+  if (!force) {
+    const cached = await readUpdateCache();
+    if (cached && typeof cached.checkedAt === 'number' && Date.now() - cached.checkedAt < UPDATE_CACHE_TTL_MS) {
+      const latestVersion = cached.latestVersion || null;
+      return {
+        currentVersion,
+        latestVersion,
+        hasUpdate: Boolean(latestVersion) && compareVersions(latestVersion, currentVersion) > 0,
+        noReleases: Boolean(cached.noReleases),
+        releaseUrl: cached.releaseUrl || RELEASES_PAGE_URL,
+        cached: true,
+      };
+    }
+  }
+
+  let result;
   const res = await fetchWithTimeout(RELEASES_API_URL, {
     method: 'GET',
     headers: { Accept: 'application/vnd.github+json' },
   });
   if (res.status === 404) {
-    return {
+    result = {
       currentVersion,
       latestVersion: null,
       hasUpdate: false,
       noReleases: true,
       releaseUrl: RELEASES_PAGE_URL,
     };
-  }
-  if (res.status === 403 || res.status === 429) {
-    return checkViaRedirect(currentVersion);
-  }
-  if (!res.ok) {
+  } else if (res.status === 403 || res.status === 429) {
+    result = await checkViaRedirect(currentVersion);
+  } else if (!res.ok) {
     throw new Error(`GitHub API ответил HTTP ${res.status}`);
+  } else {
+    const json = await res.json();
+    const latestVersion = String(json?.tag_name || json?.name || '').replace(/^v/i, '').trim();
+    const hasUpdate = Boolean(latestVersion) && compareVersions(latestVersion, currentVersion) > 0;
+    result = {
+      currentVersion,
+      latestVersion: latestVersion || currentVersion,
+      hasUpdate,
+      noReleases: false,
+      releaseUrl: typeof json?.html_url === 'string' && json.html_url.startsWith('https://github.com/')
+        ? json.html_url
+        : RELEASES_PAGE_URL,
+    };
   }
-  const json = await res.json();
-  const latestVersion = String(json?.tag_name || json?.name || '').replace(/^v/i, '').trim();
-  const hasUpdate = Boolean(latestVersion) && compareVersions(latestVersion, currentVersion) > 0;
-  return {
-    currentVersion,
-    latestVersion: latestVersion || currentVersion,
-    hasUpdate,
-    noReleases: false,
-    releaseUrl: typeof json?.html_url === 'string' && json.html_url.startsWith('https://github.com/')
-      ? json.html_url
-      : RELEASES_PAGE_URL,
-  };
+
+  await writeUpdateCache(result);
+  return result;
 }
 
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
@@ -110,7 +153,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   }
 
   if (message.type === 'oj:check-update') {
-    checkLatestRelease().then(
+    checkLatestRelease({ force: Boolean(message.force) }).then(
       data => respond({ data }),
       error => respond({ error: error.message })
     );

@@ -23,6 +23,10 @@ var OjOverlayUI = (() => {
       <aside id="sidebar" class="sidebar" aria-label="Диалоги">
         <div class="brand-row">
           <div class="brand"><h1>OJ-QWEN</h1><span class="ver">${appVersion}</span></div>
+          <div id="updateWrap" class="update-wrap" hidden>
+            <a id="updateIndicator" class="update-indicator" href="https://github.com/offlinejust/OJ-QWEN/releases/latest" target="_blank" rel="noopener noreferrer">Доступно обновление</a>
+            <div id="updateTooltip" class="update-tooltip" role="tooltip"></div>
+          </div>
         </div>
         <div class="project-box">
           <label class="project-label" for="projectSelect">Проект</label>
@@ -74,6 +78,7 @@ var OjOverlayUI = (() => {
               </div>
             </div>
           </form>
+          <button type="button" id="reportBugBtn" class="subtle-link bug-corner-btn">Сообщить об ошибке</button>
         </div>
       </section>
 
@@ -245,6 +250,27 @@ var OjOverlayUI = (() => {
       else body.appendChild(OjMarkdown.render(text));
       article.appendChild(body);
       return article;
+    }
+
+    function renderUpdateIndicator() {
+      const info = engine.state.updateInfo;
+      const wrap = $('updateWrap');
+      if (!info?.hasUpdate) {
+        wrap.hidden = true;
+        return;
+      }
+      const link = $('updateIndicator');
+      const tip = $('updateTooltip');
+      const latest = info.latestVersion || '';
+      const tipText =
+        `Вышла версия ${latest} (у вас ${info.currentVersion || appVersion}). ` +
+        `Запустите «Обновить.cmd» в папке с распакованным расширением OJ-QWEN, ` +
+        `затем нажмите ↻ на странице расширений (chrome://extensions или browser://extensions). ` +
+        `Нажмите, чтобы открыть страницу релиза.`;
+      link.href = info.releaseUrl || 'https://github.com/offlinejust/OJ-QWEN/releases/latest';
+      link.title = tipText;
+      tip.textContent = tipText;
+      wrap.hidden = false;
     }
 
     function renderSidebar() {
@@ -1004,9 +1030,7 @@ var OjOverlayUI = (() => {
           checkUpdBtn.disabled = true;
           checkUpdBtn.textContent = 'Проверяю GitHub…';
           try {
-            const reply = await chrome.runtime.sendMessage({ type: 'oj:check-update' });
-            if (reply?.error) throw new Error(reply.error);
-            const d = reply?.data;
+            const d = await engine.checkUpdates(true);
             if (d?.noReleases) {
               updStatus.style.color = '#98a395';
               updStatus.textContent = 'Релизы на GitHub пока не опубликованы.';
@@ -1028,20 +1052,6 @@ var OjOverlayUI = (() => {
         };
         updateBox.append(updHead, updStatus, checkUpdBtn);
 
-        const diagBtn = document.createElement('button');
-        diagBtn.type = 'button';
-        diagBtn.textContent = 'Скопировать DOM-диагностику (без переписки)';
-        diagBtn.onclick = async () => {
-          diagBtn.textContent = 'Собираю диагностику…';
-          try {
-            const diag = await engine.collectDomDiagnostics();
-            await navigator.clipboard.writeText(JSON.stringify(diag, null, 2));
-            diagBtn.textContent = 'Диагностика скопирована';
-          } catch {
-            diagBtn.textContent = 'Не удалось скопировать';
-          }
-        };
-
         const saveBtn = document.createElement('button');
         saveBtn.type = 'button';
         saveBtn.className = 'primary';
@@ -1054,7 +1064,116 @@ var OjOverlayUI = (() => {
           close();
         };
 
-        body.append(fSafety, fEnter, note, updateBox, diagBtn, saveBtn);
+        body.append(fSafety, fEnter, note, updateBox, saveBtn);
+      });
+    }
+
+    function openBugReportModal() {
+      const st = engine.state;
+      openModal('Сообщить об ошибке', (body) => {
+        const hint = document.createElement('div');
+        hint.style.fontSize = '12.5px';
+        hint.style.color = '#98a395';
+        hint.textContent = 'Опишите проблему в пару строк. Можно открыть предзаполненный GitHub Issue или скопировать готовый отчёт для отправки в чат.';
+
+        const fDesc = document.createElement('div');
+        fDesc.className = 'field';
+        const descLabel = document.createElement('label');
+        descLabel.textContent = 'Что произошло?';
+        const descInput = document.createElement('textarea');
+        descInput.className = 'bug-textarea';
+        descInput.placeholder = 'Например: при открытии проекта список чатов не загрузился…';
+        fDesc.append(descLabel, descInput);
+
+        const fDiag = document.createElement('label');
+        fDiag.className = 'checkbox-row';
+        const diagCb = document.createElement('input');
+        diagCb.type = 'checkbox';
+        diagCb.checked = true;
+        fDiag.append(diagCb, document.createTextNode('Приложить техданные (версия, браузер, последняя ошибка — без переписки и файлов)'));
+
+        const statusDiv = document.createElement('div');
+        statusDiv.style.fontSize = '12px';
+        statusDiv.style.color = '#8de09b';
+        statusDiv.hidden = true;
+
+        async function buildReportMarkdown() {
+          const userDesc = descInput.value.trim() || '(опишите, что произошло и какие шаги к этому привели)';
+          const lines = [
+            '### Описание проблемы',
+            userDesc,
+            '',
+            '### Среда',
+            `- **Версия OJ-QWEN:** ${appVersion}`,
+            `- **Браузер:** ${navigator.userAgent}`,
+            `- **Режим безопасности:** ${engine.getSettings().safetyMode || 'ask_all'}`,
+            `- **Рабочая папка подключена:** ${st.workspace?.granted ? 'да' : 'нет'}`,
+          ];
+          const lastErr = st.error || st.connectionError;
+          if (lastErr) {
+            lines.push(`- **Последняя ошибка:** ${lastErr}`);
+          }
+          if (diagCb.checked) {
+            try {
+              const diag = await engine.collectDomDiagnostics();
+              const safeDiag = {
+                url: diag.url,
+                composerFound: diag.composerFound,
+                answerCount: diag.answerCount,
+                apiProbe: diag.apiProbe,
+              };
+              lines.push('', '### Техническая диагностика (без переписки)', '```json', JSON.stringify(safeDiag, null, 2), '```');
+            } catch {}
+          }
+          return lines.join('\n');
+        }
+
+        const actions = document.createElement('div');
+        actions.className = 'modal-actions';
+
+        const ghBtn = document.createElement('button');
+        ghBtn.type = 'button';
+        ghBtn.className = 'primary';
+        ghBtn.textContent = 'Открыть GitHub Issue ↗';
+        ghBtn.onclick = async () => {
+          ghBtn.disabled = true;
+          try {
+            const report = await buildReportMarkdown();
+            const shortTitle = descInput.value.trim().split('\n')[0].slice(0, 72) || `Ошибка в OJ-QWEN ${appVersion}`;
+            const trimmedBody = report.length > 3500 ? report.slice(0, 3480) + '\n…' : report;
+            const url = `https://github.com/offlinejust/OJ-QWEN/issues/new?labels=bug&title=${encodeURIComponent(shortTitle)}&body=${encodeURIComponent(trimmedBody)}`;
+            window.open(url, '_blank', 'noopener,noreferrer');
+            statusDiv.hidden = false;
+            statusDiv.style.color = '#8de09b';
+            statusDiv.textContent = 'Открыта страница нового Issue на GitHub.';
+          } finally {
+            ghBtn.disabled = false;
+          }
+        };
+
+        const copyBtn = document.createElement('button');
+        copyBtn.type = 'button';
+        copyBtn.textContent = 'Скопировать отчёт';
+        copyBtn.onclick = async () => {
+          copyBtn.disabled = true;
+          try {
+            const report = await buildReportMarkdown();
+            await navigator.clipboard.writeText(report);
+            statusDiv.hidden = false;
+            statusDiv.style.color = '#8de09b';
+            statusDiv.textContent = 'Отчёт скопирован в буфер — можно вставить в любой чат.';
+          } catch {
+            statusDiv.hidden = false;
+            statusDiv.style.color = '#f58b80';
+            statusDiv.textContent = 'Не удалось скопировать отчёт.';
+          } finally {
+            copyBtn.disabled = false;
+          }
+        };
+
+        actions.append(ghBtn, copyBtn);
+        body.append(hint, fDesc, fDiag, actions, statusDiv);
+        descInput.focus();
       });
     }
 
@@ -1144,6 +1263,7 @@ var OjOverlayUI = (() => {
     $('projectSelect').onchange = e => void engine.selectProject(e.target.value);
     $('syncBtn').onclick = () => void engine.syncCatalog();
     $('settingsBtn').onclick = openSettingsModal;
+    $('reportBugBtn').onclick = openBugReportModal;
     $('retryConn').onclick = () => void engine.connect();
     $('wsBtn').onclick = () => void engine.pickWorkspaceFolder();
     $('wsDisconnect').onclick = () => void engine.disconnectWorkspaceFolder();
@@ -1219,6 +1339,10 @@ var OjOverlayUI = (() => {
     });
 
     engine.subscribe(event => {
+      if (event === 'update') {
+        renderUpdateIndicator();
+        return;
+      }
       renderTopbar();
       renderComposer();
       if (event === 'chat' || event === 'workspace') hideMentions();
@@ -1233,6 +1357,7 @@ var OjOverlayUI = (() => {
       host,
       show() {
         host.hidden = false;
+        renderUpdateIndicator();
         renderSidebar();
         renderTopbar();
         renderComposer();

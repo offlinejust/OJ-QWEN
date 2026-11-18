@@ -54,6 +54,7 @@ test('every $(\'id\') lookup in overlay-ui.js exists in app.innerHTML template',
   for (const id of usedIds) {
     assert.ok(declaredIds.has(id), `overlay-ui.js references $('${id}') which is missing in app.innerHTML`);
   }
+  assert.ok(!uiCode.includes('Скопировать DOM-диагностику'), 'old DOM diagnostics button should be removed from Settings');
 });
 
 test('all 8 content scripts bootstrap cleanly in exact manifest order and mount launcher without errors', () => {
@@ -147,11 +148,13 @@ test('all 8 content scripts bootstrap cleanly in exact manifest order and mount 
   assert.equal(engine.getSettings().safetyMode, 'ask_all');
 });
 
-test('background.js handles oj:check-update (newer, same, 404) and cleans session key on tab close', async () => {
+test('background.js handles oj:check-update (caching, force, newer, same, 404, 403 fallback) and cleans session key on tab close', async () => {
   const bgCode = fs.readFileSync(path.join(extDir, 'background.js'), 'utf8');
   let msgHandler = null;
   let tabRemovedHandler = null;
   const sessionStore = new Map();
+  const localStore = new Map();
+  let fetchCount = 0;
   let mockFetchResponse = { ok: true, status: 200, async json() { return { tag_name: 'v9.9.9', html_url: 'https://github.com/offlinejust/OJ-QWEN/releases/tag/v9.9.9' }; } };
 
   const sandbox = {
@@ -159,14 +162,18 @@ test('background.js handles oj:check-update (newer, same, 404) and cleans sessio
     setTimeout,
     clearTimeout,
     AbortController,
-    fetch: async () => mockFetchResponse,
+    fetch: async (...args) => { fetchCount++; return mockFetchResponse; },
     chrome: {
       runtime: {
         id: 'ext-1',
-        getManifest: () => ({ version: '1.2.2' }),
+        getManifest: () => ({ version: '1.2.3' }),
         onMessage: { addListener: fn => { msgHandler = fn; } },
       },
       storage: {
+        local: {
+          async get(k) { return { [k]: localStore.get(k) }; },
+          async set(obj) { for (const [k, v] of Object.entries(obj)) localStore.set(k, v); },
+        },
         session: {
           async get(k) { return { [k]: sessionStore.get(k) }; },
           async set(obj) { for (const [k, v] of Object.entries(obj)) sessionStore.set(k, v); },
@@ -187,19 +194,27 @@ test('background.js handles oj:check-update (newer, same, 404) and cleans sessio
     assert.equal(asyncReply, true);
   });
 
-  // 1. Update available
-  const rNew = await callMsg({ type: 'oj:check-update' });
+  // 1. Update available (fetches once & caches)
+  const rNew = await callMsg({ type: 'oj:check-update', force: false });
   assert.equal(rNew.data.hasUpdate, true);
   assert.equal(rNew.data.latestVersion, '9.9.9');
+  assert.equal(fetchCount, 1);
 
-  // 2. Same version
-  mockFetchResponse = { ok: true, status: 200, async json() { return { tag_name: 'v1.2.2' }; } };
-  const rSame = await callMsg({ type: 'oj:check-update' });
+  // 1b. Second non-forced check hits 6h cache (no extra fetch!)
+  const rCached = await callMsg({ type: 'oj:check-update', force: false });
+  assert.equal(rCached.data.cached, true);
+  assert.equal(rCached.data.hasUpdate, true);
+  assert.equal(fetchCount, 1);
+
+  // 2. Forced check bypasses cache -> same version
+  mockFetchResponse = { ok: true, status: 200, async json() { return { tag_name: 'v1.2.3' }; } };
+  const rSame = await callMsg({ type: 'oj:check-update', force: true });
   assert.equal(rSame.data.hasUpdate, false);
+  assert.equal(fetchCount, 2);
 
   // 3. No releases yet (404)
   mockFetchResponse = { ok: false, status: 404, async json() { return {}; } };
-  const r404 = await callMsg({ type: 'oj:check-update' });
+  const r404 = await callMsg({ type: 'oj:check-update', force: true });
   assert.equal(r404.data.noReleases, true);
   assert.equal(r404.data.hasUpdate, false);
 
@@ -211,7 +226,7 @@ test('background.js handles oj:check-update (newer, same, 404) and cleans sessio
     assert.ok(url.includes('/releases/latest'));
     return { ok: true, status: 200, url: 'https://github.com/offlinejust/OJ-QWEN/releases/tag/v1.3.0' };
   };
-  const rFallback = await callMsg({ type: 'oj:check-update' });
+  const rFallback = await callMsg({ type: 'oj:check-update', force: true });
   assert.equal(rFallback.data.hasUpdate, true);
   assert.equal(rFallback.data.latestVersion, '1.3.0');
 

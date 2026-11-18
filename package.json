@@ -1,6 +1,6 @@
 {
   "name": "oj-qwen",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "private": true,
   "description": "OJ-QWEN — оверлей вайбкод-клиент поверх chat.qwen.ai с локальными файлами, планированием и памятью.",
   "scripts": {

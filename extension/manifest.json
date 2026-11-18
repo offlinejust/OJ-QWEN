@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "OJ-QWEN",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "description": "Полноценный вайбкод-клиент поверх chat.qwen.ai с локальными файлами, планированием, памятью, diff и откатом изменений.",
   "permissions": [
     "storage",

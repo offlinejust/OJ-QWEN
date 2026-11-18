@@ -267,6 +267,7 @@ var OjAgentEngine = (() => {
       liveSteps: [],
       pendingConfirmation: null, // { op, actionTitle, path, details, danger, resolve }
       pendingQuestion: null, // { question, options, resolve }
+      updateInfo: null, // { currentVersion, latestVersion, hasUpdate, noReleases, releaseUrl }
       error: '',
     };
 
@@ -587,6 +588,8 @@ var OjAgentEngine = (() => {
       state.error = '';
       state.connectionText = 'Загружаю проекты Qwen…';
       emit('connect');
+      // Quietly check GitHub releases in background (6h cache in background.js)
+      void checkUpdates(false);
 
       try {
         if (OjQwenAdapter.isLoginVisible() && !OjQwenAdapter.getComposer()) {
@@ -1874,6 +1877,25 @@ var OjAgentEngine = (() => {
       emit('status');
     }
 
+    async function checkUpdates(force = false) {
+      try {
+        const reply = await chrome.runtime.sendMessage({ type: 'oj:check-update', force: Boolean(force) });
+        if (reply?.error) {
+          if (force) throw new Error(reply.error);
+          return null;
+        }
+        if (reply?.data) {
+          state.updateInfo = reply.data;
+          emit('update');
+          return reply.data;
+        }
+        return null;
+      } catch (err) {
+        if (force) throw err;
+        return null;
+      }
+    }
+
     function getStepsForTurn(turn) {
       return (turn && stepHistory[turn]?.steps) || null;
     }
@@ -1902,6 +1924,7 @@ var OjAgentEngine = (() => {
       resolveConfirmation,
       resolveQuestion,
       stop,
+      checkUpdates,
       getStepsForTurn,
       refreshWorkspaceInfo,
       collectDomDiagnostics: () => OjQwenAdapter.collectDomDiagnostics(),
