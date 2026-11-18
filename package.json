@@ -1,0 +1,12 @@
+{
+  "name": "oj-qwen",
+  "version": "1.2.2",
+  "private": true,
+  "description": "OJ-QWEN — оверлей вайбкод-клиент поверх chat.qwen.ai с локальными файлами, планированием и памятью.",
+  "scripts": {
+    "test": "node --test tests/*.test.cjs",
+    "pack": "node scripts/pack.cjs",
+    "pack:store": "node scripts/pack.cjs --store",
+    "release:build": "npm test && npm run pack && npm run pack:store"
+  }
+}

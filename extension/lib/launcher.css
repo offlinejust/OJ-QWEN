@@ -1,0 +1,26 @@
+:host {
+  display: block;
+  width: auto;
+  height: auto;
+  background: transparent;
+}
+
+:host([hidden]) {
+  display: none !important;
+}
+
+.oj-launcher-btn {
+  font: 600 13px Inter, "Segoe UI", system-ui, -apple-system, sans-serif;
+  padding: 9px 14px;
+  border-radius: 10px;
+  border: 1px solid #496039;
+  background: #1a2217;
+  color: #c8eb7e;
+  cursor: pointer;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+  white-space: nowrap;
+}
+
+.oj-launcher-btn:hover {
+  background: #232f1e;
+}

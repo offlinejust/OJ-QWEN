@@ -1,0 +1,125 @@
+const QWEN_ORIGIN = 'https://chat.qwen.ai';
+const REPO_SLUG = 'offlinejust/OJ-QWEN';
+const RELEASES_PAGE_URL = `https://github.com/${REPO_SLUG}/releases/latest`;
+const RELEASES_API_URL = `https://api.github.com/repos/${REPO_SLUG}/releases/latest`;
+
+function compareVersions(a, b) {
+  const pa = String(a || '').replace(/^v/i, '').split('.').map(n => parseInt(n, 10) || 0);
+  const pb = String(b || '').replace(/^v/i, '').split('.').map(n => parseInt(n, 10) || 0);
+  const len = Math.max(pa.length, pb.length, 3);
+  for (let i = 0; i < len; i++) {
+    const va = pa[i] || 0;
+    const vb = pb[i] || 0;
+    if (va > vb) return 1;
+    if (va < vb) return -1;
+  }
+  return 0;
+}
+
+async function fetchWithTimeout(url, opts = {}, timeoutMs = 10_000) {
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  try {
+    return await fetch(url, { ...opts, signal: controller ? controller.signal : undefined });
+  } catch (err) {
+    if (err?.name === 'AbortError') {
+      throw new Error('Таймаут подключения к GitHub (10 с).');
+    }
+    throw err;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+// Fallback when api.github.com hits 403 rate limit (common on shared VPN IPs):
+// Follow redirect from /releases/latest -> /releases/tag/vX.Y.Z
+async function checkViaRedirect(currentVersion) {
+  const res = await fetchWithTimeout(RELEASES_PAGE_URL, { method: 'GET', redirect: 'follow' });
+  const finalUrl = String(res.url || '');
+  const tagMatch = /\/releases\/tag\/v?([^/?#]+)/i.exec(finalUrl);
+  if (!tagMatch) {
+    return {
+      currentVersion,
+      latestVersion: null,
+      hasUpdate: false,
+      noReleases: true,
+      releaseUrl: RELEASES_PAGE_URL,
+    };
+  }
+  const latestVersion = tagMatch[1].trim();
+  return {
+    currentVersion,
+    latestVersion,
+    hasUpdate: compareVersions(latestVersion, currentVersion) > 0,
+    noReleases: false,
+    releaseUrl: finalUrl,
+  };
+}
+
+async function checkLatestRelease() {
+  const currentVersion = chrome.runtime.getManifest().version;
+  const res = await fetchWithTimeout(RELEASES_API_URL, {
+    method: 'GET',
+    headers: { Accept: 'application/vnd.github+json' },
+  });
+  if (res.status === 404) {
+    return {
+      currentVersion,
+      latestVersion: null,
+      hasUpdate: false,
+      noReleases: true,
+      releaseUrl: RELEASES_PAGE_URL,
+    };
+  }
+  if (res.status === 403 || res.status === 429) {
+    return checkViaRedirect(currentVersion);
+  }
+  if (!res.ok) {
+    throw new Error(`GitHub API ответил HTTP ${res.status}`);
+  }
+  const json = await res.json();
+  const latestVersion = String(json?.tag_name || json?.name || '').replace(/^v/i, '').trim();
+  const hasUpdate = Boolean(latestVersion) && compareVersions(latestVersion, currentVersion) > 0;
+  return {
+    currentVersion,
+    latestVersion: latestVersion || currentVersion,
+    hasUpdate,
+    noReleases: false,
+    releaseUrl: typeof json?.html_url === 'string' && json.html_url.startsWith('https://github.com/')
+      ? json.html_url
+      : RELEASES_PAGE_URL,
+  };
+}
+
+chrome.runtime.onMessage.addListener((message, sender, respond) => {
+  if (!message || sender.id !== chrome.runtime.id) return false;
+  if (sender.origin !== QWEN_ORIGIN || sender.frameId !== 0) return false;
+
+  if (message.type === 'oj:overlay-state' && sender.tab?.id !== undefined) {
+    const key = 'overlayOpen:' + sender.tab.id;
+    (async () => {
+      if (typeof message.open === 'boolean') {
+        if (message.open) await chrome.storage.session.set({ [key]: true });
+        else await chrome.storage.session.remove(key);
+        return { open: message.open };
+      }
+      const data = await chrome.storage.session.get(key);
+      return { open: Boolean(data[key]) };
+    })().then(data => respond({ data }), error => respond({ error: error.message }));
+    return true;
+  }
+
+  if (message.type === 'oj:check-update') {
+    checkLatestRelease().then(
+      data => respond({ data }),
+      error => respond({ error: error.message })
+    );
+    return true;
+  }
+
+  return false;
+});
+
+chrome.tabs.onRemoved.addListener(tabId => {
+  chrome.storage.session.remove('overlayOpen:' + tabId).catch(() => {});
+});
